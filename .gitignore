@@ -1,0 +1,9 @@
+node_modules/
+out/
+salida/
+test/
+.env
+web/
+entregas/
+entregas2/
+gh-out/

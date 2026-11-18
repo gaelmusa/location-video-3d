@@ -1,0 +1,132 @@
+name: Render video de ubicacion
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: Link de Google Maps (corto, largo o coordenadas)
+        required: true
+      titulo:
+        description: Título (opcional, si no usa el nombre del lugar)
+        required: false
+        default: ''
+      puntos:
+        description: "Puntos a mostrar (opcional, uno por línea: nombre, o nombre y link)"
+        required: false
+        default: ''
+      pedido:
+        description: Identificador del pedido (lo pone la app)
+        required: false
+        default: manual
+
+run-name: "Video ${{ inputs.pedido }}"
+
+# Cada video se parte en tramos de cuadros que se generan en paralelo (un servidor por tramo) y al
+# final se unen: sin placa de video, un video entero tarda 20–30 min; partido, lo que tarda un tramo.
+jobs:
+  preparar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      partes: ${{ steps.p.outputs.partes }}
+      videos: ${{ steps.p.outputs.videos }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: chrome-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+      - id: p
+        name: Ubicar y armar los recorridos
+        env:
+          LINK: ${{ inputs.link }}
+          TITULO: ${{ inputs.titulo }}
+          PUNTOS: ${{ inputs.puntos }}
+          PEDIDO: ${{ inputs.pedido }}
+        run: node render/partes.js preparar propiedad
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: info-${{ inputs.pedido }}
+          path: salida/info.json
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trabajo-${{ inputs.pedido }}
+          path: salida/trabajo.json
+          retention-days: 3
+
+  partes:
+    needs: preparar
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.preparar.outputs.partes) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: chrome-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: trabajo-${{ inputs.pedido }}
+          path: salida
+      - name: Generar el tramo
+        env:
+          CESIUM_ION_TOKEN: ${{ secrets.CESIUM_ION_TOKEN }}
+          PEDIDO: ${{ inputs.pedido }}
+        run: node render/partes.js parte ${{ matrix.v }} ${{ matrix.p }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parte-${{ inputs.pedido }}-${{ matrix.v }}-${{ matrix.p }}
+          path: salida/partes/${{ matrix.v }}-${{ matrix.p }}.mp4
+          retention-days: 1
+          compression-level: 0
+
+  unir:
+    needs: [preparar, partes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.preparar.outputs.videos) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+      - uses: actions/download-artifact@v4
+        with:
+          name: trabajo-${{ inputs.pedido }}
+          path: salida
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: parte-${{ inputs.pedido }}-${{ matrix.v }}-*
+          path: salida/partes
+          merge-multiple: true
+      - run: node render/partes.js unir ${{ matrix.v }}
+      # Un artifact por video: Apps Script baja cada uno por separado (límite de 50 MB por descarga)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: salida/final/*.mp4
+          retention-days: 3
+          compression-level: 0
+

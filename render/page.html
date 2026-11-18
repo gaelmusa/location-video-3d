@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>render</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700;800&display=block" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/cesium@1.146.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.146.0/Build/Cesium/Cesium.js"></script>
+<style>
+  html, body { margin: 0; width: 1080px; height: 1920px; overflow: hidden; background: #000; }
+  #map { position: absolute; inset: 0; }
+  #ov { position: absolute; inset: 0; pointer-events: none; font-family: Montserrat, Arial, sans-serif; }
+  /* Meta Reels: dejar libre ~14% arriba y ~35% abajo para el texto importante */
+  .head { position: absolute; left: 70px; right: 70px; top: 300px; color: #fff; text-shadow: 0 3px 18px rgba(0,0,0,.65); }
+  .head .t { font-size: 76px; font-weight: 800; line-height: 1.02; letter-spacing: -1px; }
+  .head .s { font-size: 40px; font-weight: 600; margin-top: 14px; opacity: .95; }
+  .lbl { position: absolute; transform: translate(-50%, -100%); display: flex; flex-direction: column; align-items: center; white-space: nowrap; }
+  .lbl .box { text-align: center; line-height: 1.15; background: rgba(255,255,255,.95); color: #111; border-radius: 16px; padding: 10px 18px; font-size: 31px; font-weight: 700; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+  .lbl .box small { font-weight: 500; color: #555; font-size: 28px; margin-left: 10px; }
+  .lbl .stem { width: 4px; height: 46px; background: rgba(255,255,255,.95); }
+  .lbl.tall .stem { height: 150px; }
+  .lbl.down { transform: translate(-50%, 0); flex-direction: column-reverse; }
+  .lbl.down .dot { margin-top: 0; margin-bottom: -2px; }
+  .lbl .dot { width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 4px solid #111; margin-top: -2px; }
+  .pin { position: absolute; transform: translate(-50%, -100%); display: flex; flex-direction: column; align-items: center; }
+  .pin .box { background: var(--accent); color: #fff; border-radius: 20px; padding: 16px 26px; font-size: 40px; font-weight: 800; box-shadow: 0 8px 30px rgba(0,0,0,.45); white-space: nowrap; }
+  .pin .stem { width: 6px; height: 70px; background: var(--accent); }
+  .pin .dot { width: 30px; height: 30px; border-radius: 50%; background: var(--accent); border: 6px solid #fff; margin-top: -4px; box-shadow: 0 0 0 10px rgba(255,255,255,.25); }
+  .street { position: absolute; transform: translate(-50%, -50%); background: rgba(17,17,17,.82); color: #fff; padding: 10px 22px; border-radius: 999px; font-size: 32px; font-weight: 700; white-space: nowrap; }
+  .area { position: absolute; transform: translate(-50%, -50%); color: #fff; font-size: 64px; font-weight: 800; letter-spacing: 6px; text-transform: uppercase; text-shadow: 0 2px 4px rgba(0,0,0,.6), 0 4px 30px rgba(0,0,0,.55); white-space: nowrap; }
+  .area.small { font-size: 34px; letter-spacing: 2px; background: rgba(0,0,0,.35); padding: 8px 18px; border-radius: 999px; text-shadow: 0 2px 8px rgba(0,0,0,.6); }
+  .lbl.custom .box { border: 4px solid var(--accent); }
+  .street { background: rgba(255,197,61,.95); color: #111; }
+  .street.zonalbl { background: var(--accent); color: #fff; font-size: 40px; padding: 12px 28px; letter-spacing: 1px; }
+  .cesium-widget-credits { transform: scale(1.6); transform-origin: left bottom; left: 20px !important; bottom: 18px !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="ov"></div>
+<script>
+'use strict';
+const C = Cesium;
+let viewer, scene, tileset, cfg, center, groundH = 0, nodes = [], areas = {};
+
+const ease = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+const lerp = (a, b, t) => a + (b - a) * t;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const toWin = C.SceneTransforms.worldToWindowCoordinates || C.SceneTransforms.wgs84ToWindowCoordinates;
+
+function fmtKm(m) { return m >= 1000 ? (m/1000 < 10 ? (m/1000).toFixed(1).replace('.', ',') : Math.round(m/1000)) + ' km' : Math.round(m/10)*10 + ' m'; }
+
+window.setup = async function (c) {
+  cfg = c;
+  document.documentElement.style.setProperty('--accent', cfg.accent || '#E4002B');
+  C.Ion.defaultAccessToken = cfg.ionToken;
+  C.RequestScheduler.maximumRequestsPerServer = 32;
+  viewer = new C.Viewer('map', {
+    animation: false, baseLayerPicker: false, fullscreenButton: false, geocoder: false, homeButton: false,
+    infoBox: false, sceneModePicker: false, selectionIndicator: false, timeline: false, navigationHelpButton: false,
+    baseLayer: false, globe: false, skyAtmosphere: new C.SkyAtmosphere(), useDefaultRenderLoop: false,
+    requestRenderMode: false, msaaSamples: cfg.cpu ? 1 : 4,
+    contextOptions: { webgl: { preserveDrawingBuffer: true, antialias: true } }
+  });
+  scene = viewer.scene;
+  scene.skyBox.show = false;
+  scene.backgroundColor = C.Color.fromCssColorString('#9cc3e6');
+  scene.fog.enabled = true;
+  viewer.resolutionScale = 1;
+
+  console.log('setup: cargando tileset');
+  tileset = await C.createGooglePhotorealistic3DTileset({ onlyUsingWithGoogleGeocoder: true });
+  tileset.maximumScreenSpaceError = cfg.sse || 12;
+  scene.primitives.add(tileset);
+
+  // Altura del terreno en el inmueble (los tiles de Google traen el relieve)
+  const flat = C.Cartesian3.fromDegrees(cfg.lng, cfg.lat, 0);
+  viewer.camera.lookAt(flat, new C.HeadingPitchRange(0, C.Math.toRadians(-89), 1500));
+  console.log('setup: esperando tiles');
+  // La altura se mide sobre los tiles cargados. En un servidor lento (sin placa de video) puede medir
+  // sobre un bloque de baja resolución y dar valores absurdos (ej. −175 m): se espera más y se repite
+  // hasta tener tiles completos y un valor creíble.
+  let medido = null;
+  for (let intento = 0; intento < 5 && medido === null; intento++) {
+    const ld = await settle(cfg.cpu ? 45000 : 20000);
+    const hs = [];
+    for (const [dx, dy] of [[0,0],[6,0],[-6,0],[0,6],[0,-6]]) {
+      const h = scene.sampleHeight(C.Cartographic.fromDegrees(cfg.lng + dx * 1e-5, cfg.lat + dy * 1e-5), undefined, 1);
+      if (isFinite(h)) hs.push(h);
+    }
+    hs.sort((a, b) => a - b);
+    const h = hs.length ? hs[0] : NaN; // el más bajo: la calle, no el techo
+    console.log('setup: tiles ' + (ld ? 'ok' : 'incompletos') + ', altura medida ' + (isFinite(h) ? h.toFixed(1) : '—') + ' m');
+    if (ld && isFinite(h) && h > -60 && h < 6000) medido = h;
+  }
+  if (medido === null) console.log('setup: no se pudo medir una altura creíble; se usa 0 m');
+  groundH = medido ?? 0;
+  center = C.Cartesian3.fromDegrees(cfg.lng, cfg.lat, groundH);
+  await buildAreas();
+  buildOverlay();
+  return { groundH, areas: Object.keys(areas) };
+};
+
+async function settle(maxMs) {
+  const t0 = performance.now();
+  let ok = 0;
+  while (performance.now() - t0 < maxMs) {
+    scene.render();
+    await sleep(cfg.cpu ? 120 : 15);
+    if (tileset.tilesLoaded) { if (++ok >= (cfg.cpu ? 1 : 3)) return true; } else ok = 0;
+  }
+  return false;
+}
+
+function el(html) { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstChild; }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---------- Contornos y calles, pegados al 3D (clasificación sobre los tiles de Google) ----------
+const ringPos = r => C.Cartesian3.fromDegreesArray(r.flat());
+function addArea(key, rings, fill, line, width) {
+  const prims = [];
+  const ids = rings.map((_, i) => key + i);
+  if (fill) prims.push({ kind: 'fill', p: scene.primitives.add(new C.GroundPrimitive({
+    geometryInstances: rings.map((r, i) => new C.GeometryInstance({ id: ids[i], geometry: new C.PolygonGeometry({ polygonHierarchy: new C.PolygonHierarchy(ringPos(r)) }), attributes: { color: C.ColorGeometryInstanceAttribute.fromColor(C.Color.fromCssColorString(fill).withAlpha(0.0)) } })),
+    appearance: new C.PerInstanceColorAppearance({ flat: true, translucent: true }), classificationType: C.ClassificationType.CESIUM_3D_TILE })) });
+  if (line) prims.push({ kind: 'line', p: scene.primitives.add(new C.GroundPolylinePrimitive({
+    geometryInstances: rings.map((r, i) => new C.GeometryInstance({ id: ids[i] + 'l', geometry: new C.GroundPolylineGeometry({ positions: ringPos(r), width, loop: false }), attributes: { color: C.ColorGeometryInstanceAttribute.fromColor(C.Color.fromCssColorString(line).withAlpha(0.0)) } })),
+    appearance: new C.PolylineColorAppearance({ translucent: true }), classificationType: C.ClassificationType.CESIUM_3D_TILE })) });
+  areas[key] = { prims, ids, fill, line };
+}
+function setArea(key, fillA, lineA) {
+  const a = areas[key];
+  if (!a) return;
+  for (const { kind, p } of a.prims) {
+    if (!p.ready) continue;
+    const col = C.Color.fromCssColorString(kind === 'fill' ? a.fill : a.line).withAlpha(kind === 'fill' ? fillA : lineA);
+    for (const id of a.ids) {
+      const at = p.getGeometryInstanceAttributes(kind === 'fill' ? id : id + 'l');
+      if (at) at.color = C.ColorGeometryInstanceAttribute.toValue(col);
+    }
+  }
+}
+window.__areasReady = () => Object.fromEntries(Object.entries(areas).map(([k, a]) => [k, a.prims.map(x => x.p.ready)]));
+async function buildAreas() {
+  if (cfg.mode === 'zonas') {
+    cfg.zones.forEach((z, i) => z.rings ? addArea('z' + i, z.rings, '#ffffff', '#ffffff', 4) : addArea('z' + i, z.lines, null, cfg.accent || '#C9A45C', 12));
+  } else if (cfg.mode === 'zona') {
+    const z = cfg.zone;
+    if (z.rings) addArea('zona', z.rings, '#ffffff', '#ffffff', 4);
+    if (z.lines) addArea('zona', z.lines, null, cfg.accent || '#C9A45C', 12);
+  } else if (cfg.mode === 'macro') {
+  } else {
+    (cfg.streets || []).forEach((st, i) => addArea('calle' + i, st.lines, null, cfg.streetColor || '#FFD000', 26));
+  }
+  const t0 = performance.now();
+  while (performance.now() - t0 < 20000 && Object.values(areas).some(a => a.prims.some(x => !x.p.ready))) { scene.render(); await sleep(30); }
+}
+let curRange = 1e9;
+const lr = x => Math.log(x);
+const cityVis = () => C.Math.clamp((lr(curRange) - lr(7000)) / (lr(12000) - lr(7000)), 0, 1);
+const barrioVis = () => { const x = lr(curRange); return x > lr(14000) || x < lr(2400) ? 0 : x > lr(6000) ? (lr(14000) - x) / (lr(14000) - lr(6000)) : (x - lr(2400)) / (lr(6000) - lr(2400)); };
+const win = (t, a, b, c, d) => t < a || t > d ? 0 : t < b ? (t - a) / (b - a) : t > c ? 1 - (t - c) / (d - c) : 1;
+const bell = (t, a, m, d) => t <= a || t >= d ? 0 : t < m ? (t - a) / (m - a) : 1 - (t - m) / (d - m);
+// Énfasis de cada zona: se enciende al llegar la cámara y después queda tenue
+function zoneEmph(t, i) {
+  const ti = cfg.zones[i].t, last = i === cfg.zones.length - 1;
+  const up = smooth(ti - 0.16, ti - 0.03, t);
+  const down = last ? 0 : smooth(ti + 0.08, ti + 0.22, t);
+  return up * (1 - down);
+}
+function animateAreas(t) {
+  if (cfg.mode === 'zonas') {
+    const base = smooth(0.02, 0.18, t);
+    cfg.zones.forEach((z, i) => {
+      const e = zoneEmph(t, i), seen = smooth(z.t - 0.16, z.t - 0.03, t);
+      if (z.rings) setArea('z' + i, 0.13 * e + 0.03 * seen * (1 - e), Math.max(0.3 * base, 0.95 * e, 0.45 * seen));
+      else setArea('z' + i, 0, Math.max(0.35 * base, 0.95 * e, 0.6 * seen));
+    });
+  } else if (cfg.mode === 'zona') {
+    // la zona se enciende suave cuando la cámara empieza a acercarse y queda hasta el final
+    const s = smooth(0.18, 0.45, t);
+    setArea('zona', 0.10 * s, 0.9 * s);
+  } else if (cfg.mode === 'macro') {
+    // barrio: se ilumina brevemente y queda tenue hasta el final
+    const b = bell(t, 0.5, 0.66, 0.9);
+    setArea('barrio', 0.16 * b, Math.max(0.85 * b, 0.35 * win(t, 0.66, 0.9, 2, 3)));
+  } else {
+    const s = win(t, 0.03, 0.22, 2, 3);
+    Object.keys(areas).forEach(k => setArea(k, 0, 0.8 * s));
+  }
+}
+
+// nombres largos en dos renglones, cortados en el espacio más cercano a la mitad
+function twoLines(name) {
+  if (name.length <= 24) return esc(name);
+  const mid = name.length / 2;
+  let best = -1;
+  for (let i = 0; i < name.length; i++) if (name[i] === ' ' && (best < 0 || Math.abs(i - mid) < Math.abs(best - mid))) best = i;
+  return best < 0 ? esc(name) : esc(name.slice(0, best)) + '<br>' + esc(name.slice(best + 1));
+}
+// rectángulo real del cartel (caja corrida + punto), sin el palito
+function rectOf(n) {
+  const parts = [...n.node.querySelectorAll('.box, .dot')];
+  return parts.length ? parts.map(e => e.getBoundingClientRect()) : [n.node.getBoundingClientRect()];
+}
+
+function buildOverlay() {
+  const ov = document.getElementById('ov');
+  ov.appendChild(el(`<div class="head"><div class="t">${esc(cfg.title || '')}</div><div class="s">${esc(cfg.subtitle || '')}</div></div>`));
+  for (const r of cfg.refs || []) {
+    const node = el(`<div class="lbl${r.custom ? ' custom' : ''}"><div class="box">${twoLines(r.name)}${r.landmark ? '' : `<small>${fmtKm(r.dist)}</small>`}</div><div class="stem"></div><div class="dot"></div></div>`);
+    ov.appendChild(node);
+    nodes.push({ node, pos: C.Cartesian3.fromDegrees(r.lng, r.lat, (r.h ?? groundH) + 5), r, idx: nodes.length });
+  }
+  for (const st of cfg.streets || []) {
+    if (!st.label) continue;
+    const node = el(`<div class="street">${esc(st.name)}</div>`);
+    ov.appendChild(node);
+    nodes.push({ node, pos: C.Cartesian3.fromDegrees(st.label.lng, st.label.lat, groundH + 3), street: true, vis: t => win(t, 0.05, 0.22, 2, 3) });
+  }
+  for (const [k, cls, vis] of [['city', 'area', null], ['barrio', 'area small', () => barrioVis()]]) {
+    const a = cfg.mode === 'macro' && cfg[k];
+    if (!a || !a.label) continue;
+    const node = el(`<div class="${cls}">${esc(k === 'barrio' ? 'Barrio ' + a.name.replace(/^Barrio\s+/i, '') : a.name)}</div>`);
+    ov.appendChild(node);
+    nodes.push({ node, pos: C.Cartesian3.fromDegrees(a.label.lng, a.label.lat, groundH + 5), area: true, [k]: true, ...(vis ? { vis } : {}) });
+  }
+  if (cfg.mode === 'zonas') {
+    cfg.zones.forEach((z, i) => {
+      const node = el(`<div class="${z.kind === 'calle' ? 'street zonalbl' : 'area'}">${esc(z.label)}</div>`);
+      ov.appendChild(node);
+      const last = i === cfg.zones.length - 1;
+      nodes.push({ node, pos: C.Cartesian3.fromDegrees(z.labelPt.lng, z.labelPt.lat, groundH + 5), area: true, vis: t => smooth(z.t - 0.13, z.t - 0.03, t) * (last ? 1 : 1 - smooth(z.t + 0.1, z.t + 0.2, t)) });
+    });
+  }
+  if (cfg.mode === 'zona') {
+    const node = el(`<div class="${cfg.zone.kind === 'calle' ? 'street zonalbl' : 'area'}">${esc(cfg.zone.label)}</div>`);
+    ov.appendChild(node);
+    nodes.push({ node, pos: center, area: true, city: true, vis: t => smooth(0.3, 0.45, t) });
+  }
+  if (cfg.pinLabel === null) return;
+  const pin = el(`<div class="pin"><div class="box">${esc(cfg.pinLabel || 'Acá')}</div><div class="stem"></div><div class="dot"></div></div>`);
+  ov.appendChild(pin);
+  nodes.push({ node: pin, pos: center, pin: true });
+}
+
+// ---------- Carteles: como máximo 2 a la vez (además del pin), rotando ----------
+const prio = n => n.pin ? 9 : n.city ? 8 : n.barrio ? 7 : n.r && n.r.major ? 6 : n.r && n.r.custom ? 5 : n.street ? 4 : n.r ? 2 - n.idx * 0.01 : 0;
+const MAXL = 2, FADE = 0.045, MIN_ON = 0.28; // en fracción del video: 0,3 s de fundido, 2 s mínimos en pantalla
+
+function placeOne(n, taken) {
+  const hit1 = r => taken.some(q => r.left < q.right + 12 && r.right > q.left - 12 && r.top < q.bottom + 12 && r.bottom > q.top - 12);
+  const hits = rs => rs.some(hit1);
+  const r = rectOf(n);
+  if (n.pin || (!hits(r) && !n.last)) { taken.push(...r); return true; }
+  const box = n.node.querySelector('.box');
+  if (!box) {
+    // nombre de calle / barrio / ciudad: se corre hacia abajo si lo tapa algo
+    n.node.style.top = (parseFloat(n.node.style.top) + (n.street ? 110 : 160)) + 'px';
+    const r2 = rectOf(n);
+    if (hits(r2)) return false;
+    taken.push(...r2); return true;
+  }
+  const w2 = box.getBoundingClientRect().width / 2 - 36;
+  const cands = [];
+  for (const tall of [false, true]) for (const down of [false, true]) for (const dx of [0, w2, -w2, w2 / 2, -w2 / 2]) cands.push([tall, down, dx]);
+  if (n.last) cands.unshift(n.last); // primero la ubicación anterior, para que no salte
+  for (const [tall, down, dx] of cands) {
+    n.node.classList.toggle('down', down);
+    n.node.classList.toggle('tall', tall);
+    box.style.transform = `translateX(${dx}px)`;
+    const b2 = box.getBoundingClientRect(), r2 = rectOf(n);
+    if (b2.left >= 16 && b2.right <= 1064 && !hits(r2)) { taken.push(...r2); n.last = [tall, down, dx]; return true; }
+  }
+  n.node.classList.remove('down', 'tall'); box.style.transform = '';
+  return false;
+}
+
+function placeOverlay(t) {
+  const W = 1080, H = 1920;
+  // 1) posición en pantalla y visibilidad "cruda" (dentro de cuadro y en su momento)
+  for (const n of nodes) {
+    const w = toWin(scene, n.pos);
+    let v = w && w.x > 60 && w.x < W - 60 && w.y > 380 && w.y < H - 300 ? 1 : 0;
+    if (n.vis) v *= n.vis(t);
+    else if (n.r && cfg.mode === 'macro' && !n.r.custom && !n.r.major) v *= C.Math.clamp((lr(curRange) - lr(n.r.dist * 0.9)) / (lr(n.r.dist * 1.6) - lr(n.r.dist * 0.9)), 0, 1);
+    else if (n.r && cfg.mode === 'micro') v *= t > 0.04 ? 1 : 0;
+    else if (n.r && cfg.mode === 'zona') v *= smooth(0.5, 0.6, t);
+    n.v = n.pin ? 1 : v;
+    if (w) {
+      n.node.style.left = w.x + 'px'; n.node.style.top = w.y + 'px';
+      n.node.classList.remove('down', 'tall');
+      const box = n.node.querySelector('.box');
+      if (box) {
+        box.style.transform = '';
+        const r = box.getBoundingClientRect();
+        const dx = r.left < 28 ? 28 - r.left : r.right > W - 28 ? W - 28 - r.right : 0;
+        if (dx) box.style.transform = `translateX(${dx}px)`;
+      } else if (!n.pin) {
+        // nombres sueltos (ciudad, barrio, calle): si tocan el borde se apagan en vez de cortarse
+        const r = n.node.getBoundingClientRect();
+        n.edge = r.left < 20 || r.right > W - 20;
+        if (n.edge) n.v = 0;
+      }
+    }
+  }
+  // 2) turnos
+  const labels = nodes.filter(n => !n.pin);
+  for (const n of labels) {
+    if (n.st === 'in' && n.v <= 0) { n.st = 'out'; n.t0 = t; }
+    if (n.st === 'out' && t - n.t0 >= FADE) n.st = 'done';
+  }
+  const busy = () => labels.filter(n => n.st === 'in' || n.st === 'out').length;
+  const unseen = labels.some(n => !n.st && n.v > 0);
+  const cand = labels.filter(n => n.v > 0 && (!n.st || (n.st === 'done' && !unseen && t - n.t0 > MIN_ON))).sort((a, b) => prio(b) - prio(a));
+  if (cand.length && busy() >= MAXL && !labels.some(n => n.st === 'out')) {
+    const urgent = cand[0].barrio || cand[0].city;
+    const victims = labels.filter(n => n.st === 'in' && !n.city && !(n.r && n.r.major && !urgent) && prio(n) < prio(cand[0]) + (urgent ? 0 : 10) && (urgent || t - n.ti >= MIN_ON))
+      .sort((a, b) => prio(a) - prio(b) || a.ti - b.ti);
+    if (victims.length) { victims[0].st = 'out'; victims[0].t0 = t; }
+  }
+  // 3) ubicar pin y carteles activos sin que se pisen; sumar nuevos si hay lugar
+  const taken = [];
+  const pin = nodes.find(n => n.pin);
+  if (pin) placeOne(pin, taken);
+  for (const n of labels.filter(n => n.st === 'in' || n.st === 'out').sort((a, b) => prio(b) - prio(a))) {
+    if (!placeOne(n, taken) && n.st === 'in') { n.st = 'done'; n.t0 = t; n.hide = true; }
+  }
+  for (const n of cand) {
+    if (busy() >= MAXL) break;
+    if (n.st === 'in' || n.st === 'out') continue;
+    if (placeOne(n, taken)) { n.st = 'in'; n.ti = t; n.hide = false; }
+  }
+  // 4) opacidad
+  if (pin) pin.node.style.opacity = 1;
+  for (const n of labels) {
+    let a = 0;
+    if (n.st === 'in') a = Math.min(1, (t - n.ti) / FADE) * Math.min(1, n.v);
+    else if (n.st === 'out' && !n.hide) a = Math.max(0, 1 - (t - n.t0) / FADE) * (n.v > 0 ? 1 : n.lastA || 0);
+    if (n.st === 'in') n.lastA = a;
+    if (n.edge) a = 0; // un nombre suelto que toca el borde desaparece al instante en lugar de verse cortado
+    n.node.style.opacity = a;
+  }
+  window.__dbg = labels.map(n => [n.r ? n.r.name : n.node.textContent.slice(0, 12), n.st, +n.v.toFixed(2), +(+n.node.style.opacity).toFixed(2), Math.round(parseFloat(n.node.style.left)), Math.round(parseFloat(n.node.style.top))].join(' '));
+}
+
+function camAt(t) {
+  const e = ease(t);
+  if (cfg.mode === 'macro') {
+    const r0 = cfg.startRange, r1 = cfg.endRange || 2200;
+    let range = Math.exp(lerp(Math.log(r0), Math.log(r1), e));
+    if (cfg.customRange && cfg.customRange < r0) {
+      // con puntos indicados: la bajada se demora donde entran todos esos puntos
+      const rc = cfg.customRange, k = [[0, r0], [0.3, rc], [0.5, rc * 0.8], [1, r1]];
+      const i = t < 0.3 ? 0 : t < 0.5 ? 1 : 2;
+      const u = (t - k[i][0]) / (k[i + 1][0] - k[i][0]);
+      const uu = i === 1 ? u : ease(u);
+      range = Math.exp(lerp(Math.log(k[i][1]), Math.log(k[i + 1][1]), uu));
+    }
+    curRange = range;
+    const pitch = C.Math.toRadians(lerp(-89.5, -52, Math.pow(e, 1.6)));
+    const heading = C.Math.toRadians(lerp(0, 18, smooth(0.4, 1, t)));
+    return new C.HeadingPitchRange(heading, pitch, range);
+  }
+  if (cfg.mode === 'zona') {
+    curRange = Math.exp(lerp(Math.log(cfg.startRange), Math.log(cfg.endRange), e));
+    const pitch = C.Math.toRadians(lerp(-89.5, -42, Math.pow(e, 1.4)));
+    const heading = C.Math.toRadians(lerp(cfg.heading0 || 0, cfg.heading1 || 15, e));
+    return new C.HeadingPitchRange(heading, pitch, curRange);
+  }
+  // micro: órbita lenta en vista de pájaro
+  const heading = C.Math.toRadians((cfg.heading0 || 20) + lerp(0, cfg.orbitDeg || 70, t));
+  const pitch = C.Math.toRadians(lerp(-38, -33, e));
+  const range = lerp(cfg.range0 || 900, cfg.range1 || 650, e);
+  return new C.HeadingPitchRange(heading, pitch, range);
+}
+
+const smooth = (a, b, x) => { const u = C.Math.clamp((x - a) / (b - a), 0, 1); return u * u * (3 - 2 * u); };
+// Recorrido por puntos de paso: curva de Hermite con tangentes Catmull-Rom (pasa por cada zona sin frenar)
+function keyAt(t) {
+  const K = cfg.keys;
+  if (t <= K[0].t) return K[0];
+  if (t >= K[K.length - 1].t) return K[K.length - 1];
+  let i = 0;
+  while (t > K[i + 1].t) i++;
+  const a = K[i], b = K[i + 1], dt = b.t - a.t, u = (t - a.t) / dt;
+  const tan = (k, f) => (k <= 0 || k >= K.length - 1) ? 0 : (f(K[k + 1]) - f(K[k - 1])) / (K[k + 1].t - K[k - 1].t);
+  const h = f => { const m0 = tan(i, f) * dt, m1 = tan(i + 1, f) * dt, u2 = u * u, u3 = u2 * u;
+    return (2 * u3 - 3 * u2 + 1) * f(a) + (u3 - 2 * u2 + u) * m0 + (-2 * u3 + 3 * u2) * f(b) + (u3 - u2) * m1; };
+  return { lat: h(k => k.lat), lng: h(k => k.lng), range: Math.exp(h(k => Math.log(k.range))), pitch: h(k => k.pitch), heading: h(k => k.heading) };
+}
+// Igual que frame(t) pero sin cargar ni dibujar el mapa: solo cámara y carteles (para arrancar una parte)
+window.preframe = function (t) {
+  if (cfg.mode === 'zonas') {
+    const k = keyAt(t);
+    curRange = k.range;
+    viewer.camera.lookAt(C.Cartesian3.fromDegrees(k.lng, k.lat, groundH), new C.HeadingPitchRange(C.Math.toRadians(k.heading), C.Math.toRadians(Math.max(-89.5, k.pitch)), k.range));
+  } else {
+    let target = center;
+    if (cfg.mode === 'macro' && cfg.focus) {
+      const f = C.Cartesian3.fromDegrees(cfg.focus.lng, cfg.focus.lat, groundH);
+      target = C.Cartesian3.lerp(f, center, smooth(0.38, 0.8, t), new C.Cartesian3());
+    }
+    viewer.camera.lookAt(target, camAt(t));
+  }
+  animateAreas(t);
+  placeOverlay(t);
+};
+
+window.frame = async function (t) {
+  let target = center;
+  if (cfg.mode === 'zonas') {
+    const k = keyAt(t);
+    curRange = k.range;
+    viewer.camera.lookAt(C.Cartesian3.fromDegrees(k.lng, k.lat, groundH), new C.HeadingPitchRange(C.Math.toRadians(k.heading), C.Math.toRadians(Math.max(-89.5, k.pitch)), k.range));
+    animateAreas(t);
+    const ok = await settle(cfg.frameTimeout || 45000);
+    scene.render();
+    placeOverlay(t);
+    return ok;
+  }
+  if (cfg.mode === 'macro' && cfg.focus) {
+    // en la parte amplia se mira entre el inmueble y la ciudad grande; después se centra en el inmueble
+    const f = C.Cartesian3.fromDegrees(cfg.focus.lng, cfg.focus.lat, groundH);
+    target = C.Cartesian3.lerp(f, center, smooth(0.38, 0.8, t), new C.Cartesian3());
+  }
+  viewer.camera.lookAt(target, camAt(t));
+  animateAreas(t);
+  const loaded = await settle(cfg.frameTimeout || 45000);
+  scene.render();
+  placeOverlay(t);
+  return loaded;
+};
+</script>
+</body>
+</html>

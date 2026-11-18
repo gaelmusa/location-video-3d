@@ -1,0 +1,34 @@
+{
+  "name": "location-video-3d",
+  "version": "0.1.0",
+  "description": "Turn a Google Maps link into vertical (1080x1920) 3D location videos with CesiumJS, headless Chromium and ffmpeg. Renders in parallel on GitHub Actions.",
+  "main": "render/job.js",
+  "scripts": {
+    "render": "node render/job.js",
+    "zones": "node render/zonas-cli.js",
+    "check": "node --check render/job.js && node --check render/render.js && node --check render/prepare.js && node --check render/partes.js && node --check render/zonas-cli.js && node --check render/zonas-lib.js"
+  },
+  "keywords": [
+    "cesium",
+    "3d-tiles",
+    "video",
+    "maps",
+    "real-estate",
+    "puppeteer",
+    "ffmpeg",
+    "github-actions",
+    "openstreetmap"
+  ],
+  "author": "Gael Musa",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@turf/turf": "^7.4.0",
+    "ffmpeg-static": "^5.3.0",
+    "puppeteer": "^24.43.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gaelmusa/location-video-3d.git"
+  }
+}
